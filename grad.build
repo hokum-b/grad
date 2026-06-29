@@ -1,0 +1,40 @@
+pkgname="my-program"
+binary-name="my_program"
+pkgver="1.0.0"
+pkgrel="1"
+pkgdesc="a magnificent c program that does awesome things"
+url="https://github.com/username/my-program"
+license="mit"
+architectures=("x86_64" "aarch64")
+
+register_dep "arch"    "glibc"  --build "make" "gcc" "git"
+register_dep "debian"  "libc6"  --build "make" "gcc" "git"
+register_dep "ubuntu"  "libc6"  --build "make" "gcc" "git"
+register_dep "void"    "glibc"  --build "gmake" "gcc" "git"
+register_dep "fedora"  "glibc"  --build "make" "gcc" "git"
+register_dep "alpine"  "musl"   --build "make" "gcc" "git"
+register_dep "chimera" "musl"   --build "make" "gcc" "git"
+
+source_tarball="https://github.com/username/${pkgname}/archive/v${pkgver}.tar.gz"
+sha256_tarball="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+if [ "${use_git}" = "true" ]; then
+    build_dir="${pkgname}"
+else
+    build_dir="${pkgname}-${pkgver}"
+fi
+
+prepare() {
+    cd "${build_dir}"
+}
+
+build() {
+    cd "${build_dir}"
+    $(get_build_tool)
+}
+
+package() {
+    cd "${build_dir}"
+    install_binary "my_program"
+    install_license "license"
+}
