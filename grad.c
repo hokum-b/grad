@@ -372,7 +372,44 @@ static void record(const char *path, const char *name, const char *ver, const ch
 static void cmd_install(const char *build_file_arg)
 {
     char build_file[PATH_MAX];
-    if (!realpath(build_file_arg, build_file)) die("build file not found");
+    if (access(build_file_arg, F_OK) == 0) {
+        if (!realpath(build_file_arg, build_file)) die("build file not found");
+    } else {
+        const char *home = getenv("HOME");
+        if (!home) die("HOME not set");
+        char index_path[PATH_MAX];
+        snprintf(index_path, sizeof(index_path), "%s/.grad/ports/master.grad", home);
+        FILE *idx = fopen(index_path, "r");
+        if (!idx) die("no index found. run grad update first.");
+        char line[4096];
+        char iname[256] = "", ipath[PATH_MAX] = "";
+        int found = 0;
+        while (fgets(line, sizeof(line), idx)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strlen(line) == 0) {
+                if (iname[0] && strcmp(iname, build_file_arg) == 0) {
+                    found = 1;
+                    break;
+                }
+                iname[0] = ipath[0] = '\0';
+                continue;
+            }
+            if (strncmp(line, "name=", 5) == 0) snprintf(iname, sizeof(iname), "%s", line + 5);
+            else if (strncmp(line, "path=", 5) == 0) snprintf(ipath, sizeof(ipath), "%s", line + 5);
+        }
+        if (!found && iname[0] && strcmp(iname, build_file_arg) == 0) {
+            found = 1;
+        }
+        fclose(idx);
+        if (!found || ipath[0] == '\0') {
+            fprintf(stderr, "%serror%s: package '%s' not found in ports or local file does not exist\n", CLR_RED, CLR_RESET, build_file_arg);
+            exit(1);
+        }
+        if (!realpath(ipath, build_file)) {
+            fprintf(stderr, "%serror%s: resolved path '%s' for package '%s' not found\n", CLR_RED, CLR_RESET, ipath, build_file_arg);
+            exit(1);
+        }
+    }
 
     char os_id[64];
     detect_os(os_id, sizeof(os_id));
@@ -638,6 +675,67 @@ static void cmd_search(const char *query)
     if (!found) printf("%sno packages found matching '%s'%s\n", CLR_DIM, query, CLR_RESET);
 }
 
+static void cmd_remove(const char *pkgname)
+{
+    const char *home = getenv("HOME");
+    char user_db[PATH_MAX];
+    if (home) snprintf(user_db, sizeof(user_db), "%s/.grad/installed", home);
+    else      snprintf(user_db, sizeof(user_db), "/tmp/grad.installed");
+
+    char found_ver[256] = {0};
+    FILE *f = fopen(user_db, "r");
+    if (f) {
+        char line[4096];
+        while (fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            char copy[4096];
+            snprintf(copy, sizeof(copy), "%s", line);
+            char *n = strtok(copy, "|");
+            char *v = strtok(NULL, "|");
+            if (n && strcmp(n, pkgname) == 0 && v)
+                snprintf(found_ver, sizeof(found_ver), "%s", v);
+        }
+        fclose(f);
+    }
+
+    if (!found_ver[0]) {
+        fprintf(stderr, "%serror%s: %s is not installed\n", CLR_RED, CLR_RESET, pkgname);
+        exit(1);
+    }
+
+    printf("\n%s%s %s%s\n\n", CLR_BOLD, pkgname, found_ver, CLR_RESET);
+
+    step("remove", "files + db");
+    char rm_script[] = "/tmp/grad.remove.XXXXXX";
+    int rfd = mkstemp(rm_script);
+    if (rfd >= 0) {
+        FILE *rf = fdopen(rfd, "w");
+        if (rf) {
+            fprintf(rf,
+                "#!/bin/sh\n"
+                "rm -f '/usr/local/bin/%s'\n"
+                "rm -rf '/usr/local/share/licenses/%s'\n"
+                "sed -i '/^%s|/d' '%s' 2>/dev/null\n",
+                pkgname, pkgname, pkgname, SYS_DB);
+            fclose(rf);
+            chmod(rm_script, 0700);
+            char run[PATH_MAX + 16];
+            snprintf(run, sizeof(run), "sudo sh '%s'", rm_script);
+            system(run);
+            unlink(rm_script);
+        }
+    }
+    char sed_user[PATH_MAX + 64];
+    snprintf(sed_user, sizeof(sed_user), "sed -i '/^%s|/d' '%s' 2>/dev/null", pkgname, user_db);
+    system(sed_user);
+    ok("remove", "done");
+
+    printf("\n%s✗%s  %s%s%s  %s(%s)%s\n\n",
+           CLR_RED, CLR_RESET,
+           CLR_BOLD, pkgname, CLR_RESET,
+           CLR_DIM, found_ver, CLR_RESET);
+}
+
 static void cmd_list(void)
 {
     const char *home = getenv("HOME");
@@ -679,12 +777,12 @@ int main(int argc, char *argv[])
 {
     colour_on = isatty(STDOUT_FILENO);
     if (argc < 2) {
-        fprintf(stderr, "usage: grad <install <build_file> | update | upgrade | search <query> | list>\n");
+        fprintf(stderr, "usage: grad <install <pkg|build_file> | remove <pkg> | update | upgrade | search <query> | list>\n");
         return 1;
     }
     if (strcmp(argv[1], "install") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "usage: grad install <path/to/grad.build>\n");
+            fprintf(stderr, "usage: grad install <pkgname|path/to/build.grad>\n");
             return 1;
         }
         cmd_install(argv[2]);
@@ -698,12 +796,17 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_search(argv[2]);
+    } else if (strcmp(argv[1], "remove") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "usage: grad remove <pkgname>\n");
+            return 1;
+        }
+        cmd_remove(argv[2]);
     } else if (strcmp(argv[1], "list") == 0) {
         cmd_list();
     } else {
-        fprintf(stderr, "usage: grad <install <build_file> | update | upgrade | search <query> | list>\n");
+        fprintf(stderr, "usage: grad <install <pkg|build_file> | remove <pkg> | update | upgrade | search <query> | list>\n");
         return 1;
     }
     return 0;
 }
-
