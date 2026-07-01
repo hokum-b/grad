@@ -11,6 +11,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <ctype.h>
+#include <dirent.h>
 
 static int colour_on = 0;
 
@@ -274,7 +275,37 @@ static void install_deps(const char *build_file_abs, const char *os_id)
     }
 }
 
-static int run_hook(const char *build_file_abs, const char *hook, const char *work_dir, const char *os_id, const char *pkgname)
+static char *detect_build_dir(const char *work_dir, const char *tarball)
+{
+    DIR *d = opendir(work_dir);
+    if (!d) return strdup(".");
+    struct dirent *ent;
+    char *found = NULL;
+    int dir_count = 0;
+    char tar_base[PATH_MAX];
+    const char *bn = strrchr(tarball, '/');
+    snprintf(tar_base, sizeof(tar_base), "%s", bn ? bn + 1 : tarball);
+
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) continue;
+        if (strcmp(ent->d_name, tar_base) == 0) continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", work_dir, ent->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            dir_count++;
+            if (found) free(found);
+            found = strdup(ent->d_name);
+        }
+    }
+    closedir(d);
+    if (dir_count == 1) return found;
+    if (found) free(found);
+    return strdup(".");
+}
+
+static int run_hook(const char *build_file_abs, const char *hook, const char *work_dir, const char *os_id, const char *pkgname, const char *build_dir)
 {
     char tmp_path[] = "/tmp/grad.hook.XXXXXX";
     int fd = mkstemp(tmp_path);
@@ -292,19 +323,17 @@ static int run_hook(const char *build_file_abs, const char *hook, const char *wo
              build_file_abs, processed);
     system(preproc);
 
-    const char *build_tool = "make";
-    if (strcmp(os_id, "chimera") == 0 || strcmp(os_id, "void") == 0) build_tool = "gmake";
-
     fprintf(f,
         "#!/bin/bash\n"
         "set -e\n"
         "OS_ID='%s'\n"
         "use_git=false\n"
+        "build_dir='%s'\n"
         "register_dep() {\n"
         "    local td=\"$1\"; shift\n"
         "    [ \"$td\" = \"$OS_ID\" ] || [ \"$td\" = \"any\" ] || return 0\n"
         "}\n"
-        "get_build_tool() { echo '%s'; }\n"
+        "get_build_tool() { echo make; }\n"
         "install_binary() {\n"
         "    local b=\"$1\"\n"
         "    if [ \"$(id -u)\" = '0' ]; then\n"
@@ -315,16 +344,25 @@ static int run_hook(const char *build_file_abs, const char *hook, const char *wo
         "}\n"
         "install_license() {\n"
         "    local l=\"$1\"\n"
-        "    if [ \"$(id -u)\" = '0' ]; then\n"
-        "        install -Dm644 \"$l\" \"/usr/local/share/licenses/%s/$l\"\n"
-        "    else\n"
-        "        sudo install -Dm644 \"$l\" \"/usr/local/share/licenses/%s/$l\"\n"
+        "    local src=\"$l\"\n"
+        "    if [ ! -f \"$src\" ]; then\n"
+        "        src=\"/tmp/grad.license.$$\"\n"
+        "        printf '%%s\\n' \"$l\" > \"$src\"\n"
         "    fi\n"
+        "    if [ \"$(id -u)\" = '0' ]; then\n"
+        "        install -Dm644 \"$src\" \"/usr/local/share/licenses/%s/$l\"\n"
+        "    else\n"
+        "        sudo install -Dm644 \"$src\" \"/usr/local/share/licenses/%s/$l\"\n"
+        "    fi\n"
+        "    [ \"$src\" != \"$l\" ] && rm -f \"$src\"\n"
         "}\n"
         ". '%s'\n"
+        "if [ ! -d \"%s/${build_dir}\" ] && [ -d \"%s/%s\" ]; then\n"
+        "    build_dir='%s'\n"
+        "fi\n"
         "cd '%s'\n"
         "%s\n",
-        os_id, build_tool, pkgname, pkgname, processed, work_dir, hook);
+        os_id, build_dir, pkgname, pkgname, processed, work_dir, work_dir, build_dir, build_dir, work_dir, hook);
 
     fclose(f);
     chmod(tmp_path, 0700);
@@ -461,12 +499,16 @@ static void cmd_install(const char *build_file_arg)
     if (system(extract_cmd) != 0) die("extraction failed");
     ok("extract", "");
 
+    char *detected_build_dir = detect_build_dir(work_dir, tarball);
+
     const char *hooks[] = { "prepare", "build", "package" };
     for (int i = 0; i < 3; i++) {
         step(hooks[i], "");
-        if (run_hook(build_file, hooks[i], work_dir, os_id, pkgname) != 0) die(hooks[i]);
+        if (run_hook(build_file, hooks[i], work_dir, os_id, pkgname, detected_build_dir) != 0) die(hooks[i]);
         ok(hooks[i], "");
     }
+
+    free(detected_build_dir);
 
     const char *home = getenv("HOME");
     char user_db[PATH_MAX];
@@ -516,7 +558,7 @@ static void cmd_update(void)
     if (!idx) die("could not open master.grad for writing");
     
     char find_cmd[PATH_MAX + 32];
-    snprintf(find_cmd, sizeof(find_cmd), "find '%s' -type f -name 'build.grad' 2>/dev/null", ports_dir);
+    snprintf(find_cmd, sizeof(find_cmd), "find '%s' -type f -name '*.grad' 2>/dev/null", ports_dir);
     FILE *find = popen(find_cmd, "r");
     if (find) {
         char build_file[PATH_MAX];
@@ -809,4 +851,4 @@ int main(int argc, char *argv[])
         return 1;
     }
     return 0;
-}
+}4
